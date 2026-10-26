@@ -34,9 +34,7 @@ async function handleEvent(event) {
   const twUrl = twUrlMatch[0];
 
   try {
-    // 1. 從網址提取台灣 UUID
     const uuidMatch = twUrl.match(/items\/([a-zA-Z0-9-]+)/);
-    
     if (!uuidMatch) {
       return client.replyMessage(event.replyToken, {
         type: 'text',
@@ -45,8 +43,6 @@ async function handleEvent(event) {
     }
 
     const uuid = uuidMatch[1];
-
-    // 2. 請求台灣煤爐 GraphQL API（直接向 API 索取 seller / item 原始 ID）
     const graphqlQuery = {
       query: `query getItem($id: String!) {
         item(id: $id) {
@@ -59,7 +55,6 @@ async function handleEvent(event) {
 
     let mId = null;
 
-    // 先嘗試請求 台灣跨國 GraphQL API
     try {
       const apiResp = await fetch('https://tw.mercari.com/api/graphql', {
         method: 'POST',
@@ -80,10 +75,9 @@ async function handleEvent(event) {
         }
       }
     } catch (e) {
-      console.log('GraphQL API error, switching to HTML match fallback...');
+      console.log('GraphQL API failed, using fallback...');
     }
 
-    // 3. 備用方案：抓取頁面並用萬用正則匹配隱藏的 rawItemId
     if (!mId) {
       const htmlResp = await fetch(twUrl, {
         headers: {
@@ -91,8 +85,6 @@ async function handleEvent(event) {
         }
       });
       const html = await htmlResp.text();
-
-      // 搜尋 "rawItemId":"m12345678901" 或一般 "m12345678901"
       const rawMatch = html.match(/"rawItemId"\s*:\s*"(m\d{10,11})"/);
       if (rawMatch) {
         mId = rawMatch[1];
@@ -104,7 +96,6 @@ async function handleEvent(event) {
 
     if (mId) {
       const jpUrl = `https://jp.mercari.com/item/${mId}`;
-
       return client.replyMessage(event.replyToken, {
         type: 'text',
         text: `✅ 已成功為您解析日本原廠頁面：\n\n🇯🇵 日本 Mercari 網址：\n${jpUrl}`
@@ -124,4 +115,7 @@ async function handleEvent(event) {
   }
 }
 
-const PORT = process.env.PORT ||
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`🚀 LINE Bot 服務已啟動，Port: ${PORT}`);
+});
