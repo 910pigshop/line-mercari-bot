@@ -34,25 +34,55 @@ async function handleEvent(event) {
   const twUrl = twUrlMatch[0];
 
   try {
-    // 提取 UUID (例如 1c93d92a-8a5a-4e1d-849f-caad4385e5da)
+    // 1. 從網址提取商品的 UUID
     const uuidMatch = twUrl.match(/items\/([a-zA-Z0-9-]+)/);
     
-    // 方法一：偽裝成 Googlebot 存取（Cloudflare 通常放行搜尋引擎爬蟲）
-    const response = await fetch(twUrl, {
+    if (!uuidMatch) {
+      return client.replyMessage(event.replyToken, {
+        type: 'text',
+        text: '❌ 網址格式不正確，找不到台灣煤爐的商品 UUID。'
+      });
+    }
+
+    const uuid = uuidMatch[1];
+
+    // 2. 直接請求台灣煤爐的內部 Data API，繞過網頁渲染與 Cloudflare 阻擋
+    const apiUrl = `https://tw.mercari.com/_next/data/latest/zh-hant/items/${uuid}.json`;
+
+    let response = await fetch(apiUrl, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
-        'Accept': 'text/html,application/xhtml+xml',
-        'Accept-Language': 'zh-TW,zh;q=0.9'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+        'Accept': 'application/json',
+        'Referer': twUrl
       }
     });
 
-    const html = await response.text();
+    // 如果 Next.js data API 無法取得，備用方案：請求 HTML 頁面並尋找 script JSON 區塊
+    let mId = null;
 
-    // 正則匹配日本 m-ID
-    let mIdMatch = html.match(/m\d{10,11}/);
+    if (response.ok) {
+      const data = await response.json();
+      const jsonStr = JSON.stringify(data);
+      const mIdMatch = jsonStr.match(/m\d{10,11}/);
+      if (mIdMatch) mId = mIdMatch[0];
+    }
 
-    if (mIdMatch) {
-      const mId = mIdMatch[0];
+    // 備用解析：若 JSON 接口未順利回應，直接 fetch HTML 解析 __NEXT_DATA__
+    if (!mId) {
+      const htmlResp = await fetch(twUrl, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
+          'Accept': 'text/html'
+        }
+      });
+      const html = await htmlResp.text();
+      
+      // 在內嵌的 __NEXT_DATA__ 腳本中搜尋 m-ID
+      const mIdMatch = html.match(/m\d{10,11}/);
+      if (mIdMatch) mId = mIdMatch[0];
+    }
+
+    if (mId) {
       const jpUrl = `https://jp.mercari.com/item/${mId}`;
 
       return client.replyMessage(event.replyToken, {
@@ -62,14 +92,14 @@ async function handleEvent(event) {
     } else {
       return client.replyMessage(event.replyToken, {
         type: 'text',
-        text: '❌ 無法從該台灣網頁中讀取到日本 m-ID，請確認商品是否已下架或網址是否正確。'
+        text: '❌ 無法從該商品頁面中讀取到日本 m-ID，請確認商品是否已下架。'
       });
     }
   } catch (error) {
     console.error('解析錯誤:', error.message);
     return client.replyMessage(event.replyToken, {
       type: 'text',
-      text: '⚠️ 抓取失敗，建議改用 1 秒轉日本網頁工具喔！'
+      text: '⚠️ 解析失敗，請確認網址是否正確或稍後再試！'
     });
   }
 }
