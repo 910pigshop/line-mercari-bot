@@ -1,6 +1,7 @@
 {
   "name": "line-mercari-bot",
   "version": "1.0.0",
+  "description": "Mercari TW to JP URL Converter",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
