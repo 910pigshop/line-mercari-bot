@@ -1,6 +1,5 @@
 const express = require('express');
 const line = require('@line/bot-sdk');
-const { chromium } = require('playwright');
 
 const config = {
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
@@ -34,60 +33,23 @@ async function handleEvent(event) {
 
   const twUrl = twUrlMatch[0];
 
-  let browser;
   try {
-    // 啟動瀏覽器並進行高級真人特徵偽裝
-    browser = await chromium.launch({ 
-      headless: true,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-blink-features=AutomationControlled',
-        '--no-first-run',
-        '--no-zygote',
-        '--single-process',
-        '--disable-gpu'
-      ]
-    });
-
-    const context = await browser.newContext({
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
-      viewport: { width: 1920, height: 1080 },
-      deviceScaleFactor: 1,
-      hasTouch: false,
-      isMobile: false,
-      locale: 'zh-TW',
-      timezoneId: 'Asia/Taipei',
-      extraHTTPHeaders: {
-        'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-        'accept-language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7',
-        'sec-ch-ua': '"Google Chrome";v="123", "Not:A-Brand";v="8", "Chromium";v="123"',
-        'sec-ch-ua-mobile': '?0',
-        'sec-ch-ua-platform': '"Windows"',
-        'sec-fetch-dest': 'document',
-        'sec-fetch-mode': 'navigate',
-        'sec-fetch-site': 'none',
-        'sec-fetch-user': '?1',
-        'upgrade-insecure-requests': '1'
+    // 提取 UUID (例如 1c93d92a-8a5a-4e1d-849f-caad4385e5da)
+    const uuidMatch = twUrl.match(/items\/([a-zA-Z0-9-]+)/);
+    
+    // 方法一：偽裝成 Googlebot 存取（Cloudflare 通常放行搜尋引擎爬蟲）
+    const response = await fetch(twUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
+        'Accept': 'text/html,application/xhtml+xml',
+        'Accept-Language': 'zh-TW,zh;q=0.9'
       }
     });
 
-    const page = await context.newPage();
+    const html = await response.text();
 
-    // 隱藏 webdriver 標記，避開 Cloudflare 機器人檢測
-    await page.addInitScript(() => {
-      Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-    });
-
-    // 只等待 DOM 加載完成即停止，避免媒體資源拉長連線時間
-    await page.goto(twUrl, { waitUntil: 'domcontentloaded', timeout: 35000 });
-    
-    // 取得網頁原始碼內容
-    const content = await page.content();
-
-    // 優先搜尋日本原廠 m-ID (例如 m12345678901)
-    const mIdMatch = content.match(/m\d{10,11}/);
+    // 正則匹配日本 m-ID
+    let mIdMatch = html.match(/m\d{10,11}/);
 
     if (mIdMatch) {
       const mId = mIdMatch[0];
@@ -104,13 +66,11 @@ async function handleEvent(event) {
       });
     }
   } catch (error) {
-    console.error('爬蟲錯誤詳細:', error.message);
+    console.error('解析錯誤:', error.message);
     return client.replyMessage(event.replyToken, {
       type: 'text',
-      text: '⚠️ 網頁受 Cloudflare 防火牆阻擋或連線逾時。若持續發生，建議直接使用 1 秒轉日本網頁工具喔！'
+      text: '⚠️ 抓取失敗，建議改用 1 秒轉日本網頁工具喔！'
     });
-  } finally {
-    if (browser) await browser.close();
   }
 }
 
