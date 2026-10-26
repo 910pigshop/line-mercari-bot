@@ -1,5 +1,6 @@
 const express = require('express');
 const line = require('@line/bot-sdk');
+const fetch = require('node-fetch');
 
 const config = {
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
@@ -69,7 +70,7 @@ async function handleEvent(event) {
       console.log('Cross border API retry...');
     }
 
-    // 3. 備用方案：透過第三方數據開放點解析
+    // 3. 備用方案：透過第三方 Open Graph 模擬存取
     if (!mId) {
       const fallbackUrl = `https://tw.mercari.com/zh-hant/items/${uuid}`;
       const htmlResp = await fetch(fallbackUrl, {
@@ -96,4 +97,16 @@ async function handleEvent(event) {
         text: '❌ 無法從該商品頁面中讀取到日本 m-ID，請確認商品是否已下架。'
       });
     }
-  } catch
+  } catch (error) {
+    console.error('解析錯誤:', error.message);
+    return client.replyMessage(event.replyToken, {
+      type: 'text',
+      text: '⚠️ 解析失敗，請確認網址是否正確或稍後再試！'
+    });
+  }
+}
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`🚀 LINE Bot 服務已啟動，Port: ${PORT}`);
+});
