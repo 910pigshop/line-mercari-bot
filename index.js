@@ -36,7 +36,6 @@ async function handleEvent(event) {
 
   let browser;
   try {
-    // 針對 Render 雲端環境優化的輕量化無頭瀏覽器設定
     browser = await chromium.launch({ 
       headless: true,
       args: [
@@ -52,13 +51,22 @@ async function handleEvent(event) {
     });
 
     const context = await browser.newContext({
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+      viewport: { width: 1280, height: 720 },
+      extraHTTPHeaders: {
+        'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7'
+      }
     });
+
     const page = await context.newPage();
 
-    await page.goto(twUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    const content = await page.content();
+    // 採用 commit 等待策略，抓到第一時間回應，避免 30 秒逾時
+    await page.goto(twUrl, { waitUntil: 'commit', timeout: 45000 });
+    
+    // 稍等 2 秒讓關鍵 HTML 載入
+    await page.waitForTimeout(2000);
 
+    const content = await page.content();
     const mIdMatch = content.match(/m\d{10,11}/);
 
     if (mIdMatch) {
