@@ -34,52 +34,72 @@ async function handleEvent(event) {
   const twUrl = twUrlMatch[0];
 
   try {
-    // 1. 從網址提取商品的 UUID
+    // 1. 從網址提取台灣 UUID
     const uuidMatch = twUrl.match(/items\/([a-zA-Z0-9-]+)/);
     
     if (!uuidMatch) {
       return client.replyMessage(event.replyToken, {
         type: 'text',
-        text: '❌ 網址格式不正確，找不到台灣煤爐的商品 UUID。'
+        text: '❌ 網址格式不正確，找不到商品 UUID。'
       });
     }
 
     const uuid = uuidMatch[1];
 
-    // 2. 直接請求台灣煤爐的內部 Data API，繞過網頁渲染與 Cloudflare 阻擋
-    const apiUrl = `https://tw.mercari.com/_next/data/latest/zh-hant/items/${uuid}.json`;
+    // 2. 請求台灣煤爐 GraphQL API（直接向 API 索取 seller / item 原始 ID）
+    const graphqlQuery = {
+      query: `query getItem($id: String!) {
+        item(id: $id) {
+          id
+          rawItemId
+        }
+      }`,
+      variables: { id: uuid }
+    };
 
-    let response = await fetch(apiUrl, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
-        'Accept': 'application/json',
-        'Referer': twUrl
-      }
-    });
-
-    // 如果 Next.js data API 無法取得，備用方案：請求 HTML 頁面並尋找 script JSON 區塊
     let mId = null;
 
-    if (response.ok) {
-      const data = await response.json();
-      const jsonStr = JSON.stringify(data);
-      const mIdMatch = jsonStr.match(/m\d{10,11}/);
-      if (mIdMatch) mId = mIdMatch[0];
+    // 先嘗試請求 台灣跨國 GraphQL API
+    try {
+      const apiResp = await fetch('https://tw.mercari.com/api/graphql', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+          'Referer': twUrl
+        },
+        body: JSON.stringify(graphqlQuery)
+      });
+
+      if (apiResp.ok) {
+        const resJson = await apiResp.json();
+        if (resJson?.data?.item?.rawItemId) {
+          mId = resJson.data.item.rawItemId;
+        } else if (resJson?.data?.item?.id && resJson.data.item.id.startsWith('m')) {
+          mId = resJson.data.item.id;
+        }
+      }
+    } catch (e) {
+      console.log('GraphQL API error, switching to HTML match fallback...');
     }
 
-    // 備用解析：若 JSON 接口未順利回應，直接 fetch HTML 解析 __NEXT_DATA__
+    // 3. 備用方案：抓取頁面並用萬用正則匹配隱藏的 rawItemId
     if (!mId) {
       const htmlResp = await fetch(twUrl, {
         headers: {
-          'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
-          'Accept': 'text/html'
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36'
         }
       });
       const html = await htmlResp.text();
-      
-      // 在內嵌的 __NEXT_DATA__ 腳本中搜尋 m-ID
-      const mIdMatch = html.match(/m\d{10,11}/);
-      if (mIdMatch) mId = mIdMatch[0];
+
+      // 搜尋 "rawItemId":"m12345678901" 或一般 "m12345678901"
+      const rawMatch = html.match(/"rawItemId"\s*:\s*"(m\d{10,11})"/);
+      if (rawMatch) {
+        mId = rawMatch[1];
+      } else {
+        const generalMatch = html.match(/m\d{10,11}/);
+        if (generalMatch) mId = generalMatch[0];
+      }
     }
 
     if (mId) {
@@ -104,7 +124,4 @@ async function handleEvent(event) {
   }
 }
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`🚀 LINE Bot 服務已啟動，Port: ${PORT}`);
-});
+const PORT = process.env.PORT ||
