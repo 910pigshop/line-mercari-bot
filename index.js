@@ -28,6 +28,7 @@ async function handleEvent(event) {
   const text = event.message.text.trim();
   const twUrlMatch = text.match(/https?:\/\/tw\.mercari\.com\/[^\s]+/);
 
+  // 沒找到台灣煤爐網址，保持沉默
   if (!twUrlMatch) {
     return Promise.resolve(null);
   }
@@ -35,19 +36,16 @@ async function handleEvent(event) {
   const twUrl = twUrlMatch[0];
 
   try {
-    // 1. 提取 UUID (例如 1c93d92a-8a5a-4e1d-849f-caad4385e5da)
     const uuidMatch = twUrl.match(/items\/([a-zA-Z0-9-]+)/);
+    // 提取 UUID 失敗，保持沉默
     if (!uuidMatch) {
-      return client.replyMessage(event.replyToken, {
-        type: 'text',
-        text: '❌ 網址格式不正確，找不到商品 UUID。'
-      });
+      return Promise.resolve(null);
     }
 
     const uuid = uuidMatch[1];
     let mId = null;
 
-    // 2. 直連 Mercari 跨境後端 API 取得真實原廠 ID
+    // 1. 直連 Mercari 跨境後端 API 取得真實原廠 ID
     const cbApiUrl = `https://api.mercari.jp/cross_border/v1/items/${uuid}`;
     
     try {
@@ -67,10 +65,10 @@ async function handleEvent(event) {
         }
       }
     } catch (e) {
-      console.log('Cross border API retry...');
+      console.log('Cross border API error, trying fallback...');
     }
 
-    // 3. 備用方案：透過第三方 Open Graph 模擬存取
+    // 2. 備用解析方案
     if (!mId) {
       const fallbackUrl = `https://tw.mercari.com/zh-hant/items/${uuid}`;
       const htmlResp = await fetch(fallbackUrl, {
@@ -85,24 +83,22 @@ async function handleEvent(event) {
       if (match) mId = match[0];
     }
 
+    // 3. 只有成功拿到 m-ID 才發送回覆訊息
     if (mId) {
       const jpUrl = `https://jp.mercari.com/item/${mId}`;
       return client.replyMessage(event.replyToken, {
         type: 'text',
         text: `🤖 此為ROBOT自動通知🤖 因偵測到非日本MERCARI頁面,已成功為您導入日本頁面 請確認是否與原提供頁面是否為相同商品 如確認為相同商品 請務必回覆【相同】：\n\n🇯🇵 日本 Mercari 網址：\n${jpUrl}`
       });
-    } else {
-      return client.replyMessage(event.replyToken, {
-        type: 'text',
-        text: '❌ 無法從該商品頁面中讀取到日本 m-ID，請確認商品是否已下架。'
-      });
     }
+
+    // 讀取不到 m-ID，保持沉默
+    return Promise.resolve(null);
+
   } catch (error) {
     console.error('解析錯誤:', error.message);
-    return client.replyMessage(event.replyToken, {
-      type: 'text',
-      text: '⚠️ 解析失敗，請確認網址是否正確或稍後再試！'
-    });
+    // 發生系統異常，保持沉默
+    return Promise.resolve(null);
   }
 }
 
