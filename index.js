@@ -89,7 +89,7 @@ async function handleEvent(event) {
       const jpUrl = `https://jp.mercari.com/item/${mId}`;
       return client.replyMessage(event.replyToken, {
         type: 'text',
-        text: `✅ 此為ROBOT自動通知:因偵測到非日本MERCARI頁面,已成功為您導入日本頁面 請確認是否與原提供頁面是否為相同商品 如確認為相同商品 請回覆【相同】>：\n\n🇯🇵 日本 Mercari 網址：\n${jpUrl}`
+        text: `🤖 此為ROBOT自動通知🤖 因偵測到非日本MERCARI頁面,已成功為您導入日本頁面 請確認是否與原提供頁面是否為相同商品 如確認為相同商品 請務必回覆【相同】>：\n\n🇯🇵 日本 Mercari 網址：\n${jpUrl}`
       });
     } else {
       return client.replyMessage(event.replyToken, {
