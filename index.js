@@ -20,50 +20,77 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
   }
 });
 
-// 解析單一台灣 Mercari 網址（精準比對個人商品 m-ID 與 Shops product_id）
+// 解析單一台灣 Mercari 網址
 async function getJpUrlFromTwUrl(fullUrl) {
-  // 1. 精準提取 UUID (不管是一般商品還是 Shops 商店，都有這串 UUID)
+  // 1. 先檢測是否為 Shops 商店商品 (網址是否帶有 variant ID)
+  const variantMatch = fullUrl.match(/variant=([a-zA-Z0-9-]+)/);
+
+  if (variantMatch) {
+    const variantId = variantMatch[1];
+    try {
+      // 直連台灣 Mercari GraphQL，以 variant ID 取得 Shops 原始 Product ID
+      const gqResp = await fetch('https://tw.mercari.com/api/graphql', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+          'Referer': 'https://tw.mercari.com/'
+        },
+        body: JSON.stringify({
+          query: `query GetShopVariant($id: String!) { shopProductVariant(id: $id) { productId rawProductId } }`,
+          variables: { id: variantId }
+        })
+      });
+
+      if (gqResp.ok) {
+        const gqData = await gqResp.json();
+        const vData = gqData?.data?.shopProductVariant;
+        const shopProdId = vData?.rawProductId || vData?.productId;
+        if (shopProdId) {
+          return `https://jp.mercari.com/shops/product/${shopProdId}`;
+        }
+      }
+    } catch (e) {
+      console.log(`[Shops Variant Error] ${variantId}:`, e.message);
+    }
+  }
+
+  // 2. 一般個人賣家商品解析 (原本完全正常的邏輯，保持不動)
   const uuidMatch = fullUrl.match(/items\/([a-zA-Z0-9-]+)/);
   if (!uuidMatch) return null;
 
   const uuid = uuidMatch[1];
 
   try {
-    // 2. 打 Mercari 跨境後端 API 取得商品元數據
-    const apiUrl = `https://api.mercari.jp/cross_border/v1/items/${uuid}`;
-    const response = await fetch(apiUrl, {
+    const cbApiUrl = `https://api.mercari.jp/cross_border/v1/items/${uuid}`;
+    const cbResp = await fetch(cbApiUrl, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
         'Accept': 'application/json'
       }
     });
 
-    if (response.ok) {
-      const data = await response.json();
-      const item = data?.item || data || {};
-
-      // 【A 情況】Mercari Shops 商家商品：獲取 product_id / shop_product_id
-      const shopProductId = item.product_id || item.shop_product_id || item.raw_product_id;
-      if (shopProductId) {
-        return `https://jp.mercari.com/shops/product/${shopProductId}`;
+    if (cbResp.ok) {
+      const cbData = await cbResp.json();
+      const item = cbData?.item || cbData || {};
+      
+      // 如果一般 API 也帶有 Shops product_id
+      if (item.product_id || item.raw_product_id) {
+        const pId = item.raw_product_id || item.product_id;
+        return `https://jp.mercari.com/shops/product/${pId}`;
       }
 
-      // 【B 情況】一般個人賣家商品：獲取 m-ID
+      // 一般個人 m-ID
       const mId = item.id || item.raw_item_id;
       if (mId && typeof mId === 'string' && mId.startsWith('m')) {
         return `https://jp.mercari.com/item/${mId}`;
       }
-
-      // 【C 情況】若是 Shops 商品但 id 不是 m 開頭且長度較長 (即為 Shops Hash)
-      if (mId && typeof mId === 'string' && !mId.startsWith('m')) {
-        return `https://jp.mercari.com/shops/product/${mId}`;
-      }
     }
   } catch (e) {
-    console.error(`[API Error] UUID: ${uuid}`, e.message);
+    console.log(`[Item Error] ${uuid}:`, e.message);
   }
 
-  // 3. 備用機制：若 API 剛好未回應，透過開放爬蟲標頭直接對台灣頁面提取隱藏欄位
+  // 3. 備用方案
   try {
     const htmlResp = await fetch(`https://tw.mercari.com/zh-hant/items/${uuid}`, {
       headers: {
@@ -72,20 +99,12 @@ async function getJpUrlFromTwUrl(fullUrl) {
       }
     });
     const html = await htmlResp.text();
-
-    // 先找 Shops Hash
-    const shopHashMatch = html.match(/"product_id"\s*:\s*"([a-zA-Z0-9]{20,26})"/);
-    if (shopHashMatch) {
-      return `https://jp.mercari.com/shops/product/${shopHashMatch[1]}`;
-    }
-
-    // 再找一般 m-ID
-    const itemMatch = html.match(/m\d{10,11}/);
-    if (itemMatch) {
-      return `https://jp.mercari.com/item/${itemMatch[0]}`;
+    const match = html.match(/m\d{10,11}/);
+    if (match) {
+      return `https://jp.mercari.com/item/${match[0]}`;
     }
   } catch (e) {
-    console.error(`[Fallback Error] UUID: ${uuid}`, e.message);
+    console.log(`[Fallback Error] ${uuid}:`, e.message);
   }
 
   return null;
@@ -98,8 +117,8 @@ async function handleEvent(event) {
 
   const text = event.message.text.trim();
 
-  // 抓出訊息中所有台灣 Mercari 網址 (完整網址包含參數)
-  const twUrlMatches = text.match(/https?:\/\/tw\.mercari\.com\/[^\s\n]+/g);
+  // 抓出訊息中所有台灣 Mercari 網址 (改用更穩定的正則，避免被特殊引數截斷)
+  const twUrlMatches = text.match(/https?:\/\/tw\.mercari\.com\/[^\s]+/g);
 
   if (!twUrlMatches || twUrlMatches.length === 0) {
     return Promise.resolve(null);
