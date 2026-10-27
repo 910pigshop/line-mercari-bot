@@ -20,11 +20,17 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
   }
 });
 
-// 單一 UUID 轉日本網址的解析邏輯（支援個人商品 + Shops 商店商品）
-async function getJpUrlFromTwUuid(uuid) {
+// 解析單一台灣 Mercari 網址（支援一般賣家 + Mercari Shops 商家）
+async function getJpUrlFromTwUrl(fullUrl) {
+  // 1. 淨化網址：去掉 ?variant=... 等 query 參數並精準提取 UUID
+  const cleanUrl = fullUrl.split('?')[0];
+  const uuidMatch = cleanUrl.match(/items\/([a-zA-Z0-9-]+)/);
+  if (!uuidMatch) return null;
+
+  const uuid = uuidMatch[1];
   let resultUrl = null;
 
-  // 1. 直連 Mercari 跨境 API 解析 (支援 Shops 與 一般商品)
+  // 2. 方法一：直連 Mercari 跨境 API 深度解析
   try {
     const cbApiUrl = `https://api.mercari.jp/cross_border/v1/items/${uuid}`;
     const cbResp = await fetch(cbApiUrl, {
@@ -36,30 +42,33 @@ async function getJpUrlFromTwUuid(uuid) {
 
     if (cbResp.ok) {
       const cbData = await cbResp.json();
-      
-      // 判斷是否為 Shops 商店商品
-      if (cbData?.item?.shop_id || cbData?.item?.is_shops || cbData?.item?.id?.length > 15) {
-        const productId = cbData?.item?.raw_item_id || cbData?.item?.id || cbData?.item?.product_id;
-        if (productId) {
+      const item = cbData?.item || {};
+
+      // Shops 商店商品判斷
+      if (item.shop_id || item.is_shops || item.product_id || item.raw_item_id?.length > 15 || item.id?.length > 15) {
+        const productId = item.raw_item_id || item.product_id || item.id;
+        if (productId && !productId.startsWith('m')) {
           resultUrl = `https://jp.mercari.com/shops/product/${productId}`;
         }
-      } 
-      // 一般個人賣家商品
-      else if (cbData?.item?.id) {
-        resultUrl = `https://jp.mercari.com/item/${cbData.item.id}`;
-      } else if (cbData?.raw_item_id) {
-        resultUrl = `https://jp.mercari.com/item/${cbData.raw_item_id}`;
+      }
+      
+      // 一般個人商品判斷
+      if (!resultUrl) {
+        if (item.id && item.id.startsWith('m')) {
+          resultUrl = `https://jp.mercari.com/item/${item.id}`;
+        } else if (item.raw_item_id && item.raw_item_id.startsWith('m')) {
+          resultUrl = `https://jp.mercari.com/item/${item.raw_item_id}`;
+        }
       }
     }
   } catch (e) {
-    console.log(`[${uuid}] Cross border API error, trying fallback...`);
+    console.log(`[${uuid}] Cross border API failed, switching to HTML parsing...`);
   }
 
-  // 2. 備用方案：解析 HTML 頁面（加入 Shops URL 匹配）
+  // 3. 方法二：備用方案，直接爬取台灣 HTML 全面解讀隱藏 JSON
   if (!resultUrl) {
     try {
-      const fallbackUrl = `https://tw.mercari.com/zh-hant/items/${uuid}`;
-      const htmlResp = await fetch(fallbackUrl, {
+      const htmlResp = await fetch(cleanUrl, {
         headers: {
           'User-Agent': 'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)',
           'Accept': 'text/html'
@@ -67,19 +76,29 @@ async function getJpUrlFromTwUuid(uuid) {
       });
       const html = await htmlResp.text();
 
-      // 先匹配 Shops 商店 ID (例如 /shops/product/j3gYo6MwpP57Xt562uu4SW)
+      // A. 先比對是否為 Shops 商店網址標記 (例如 /shops/product/j3gYo6MwpP57Xt562uu4SW)
       const shopMatch = html.match(/shops\/product\/([a-zA-Z0-9]+)/);
       if (shopMatch) {
         resultUrl = `https://jp.mercari.com/shops/product/${shopMatch[1]}`;
-      } else {
-        // 匹配一般個人商品 m-ID (例如 m12345678901)
+      }
+
+      // B. 比對 JSON 欄位中的 "productId":"j3gYo6MwpP57Xt562uu4SW"
+      if (!resultUrl) {
+        const prodIdMatch = html.match(/"productId"\s*:\s*"([a-zA-Z0-9]+)"/);
+        if (prodIdMatch && !prodIdMatch[1].startsWith('m')) {
+          resultUrl = `https://jp.mercari.com/shops/product/${prodIdMatch[1]}`;
+        }
+      }
+
+      // C. 比對一般個人商品的 m-ID
+      if (!resultUrl) {
         const itemMatch = html.match(/m\d{10,11}/);
         if (itemMatch) {
           resultUrl = `https://jp.mercari.com/item/${itemMatch[0]}`;
         }
       }
     } catch (e) {
-      console.log(`[${uuid}] Fallback error`);
+      console.log(`[${uuid}] HTML Fallback error:`, e.message);
     }
   }
 
@@ -93,7 +112,7 @@ async function handleEvent(event) {
 
   const text = event.message.text.trim();
 
-  // 抓出訊息中「所有」台灣 Mercari 網址
+  // 抓出訊息中「所有」台灣 Mercari 網址 (包括帶有 ? 參數的網址)
   const twUrlMatches = text.match(/https?:\/\/tw\.mercari\.com\/[^\s]+/g);
 
   if (!twUrlMatches || twUrlMatches.length === 0) {
@@ -101,30 +120,20 @@ async function handleEvent(event) {
   }
 
   try {
-    // 提取所有 UUID 並去重
-    const uuidMap = new Map();
-    for (const url of twUrlMatches) {
-      const match = url.match(/items\/([a-zA-Z0-9-]+)/);
-      if (match && !uuidMap.has(match[1])) {
-        uuidMap.set(match[1], url);
-      }
-    }
+    // 網址去重
+    const uniqueUrls = Array.from(new Set(twUrlMatches));
 
-    if (uuidMap.size === 0) {
-      return Promise.resolve(null);
-    }
-
-    // 並列處理多網址解析
-    const uuids = Array.from(uuidMap.keys());
+    // 並列解析所有網址
     const results = await Promise.all(
-      uuids.map(async (uuid) => {
-        const jpUrl = await getJpUrlFromTwUuid(uuid);
-        return { uuid, jpUrl };
+      uniqueUrls.map(async (url) => {
+        const jpUrl = await getJpUrlFromTwUrl(url);
+        return { url, jpUrl };
       })
     );
 
     const successJpUrls = results.filter(r => r.jpUrl !== null).map(r => r.jpUrl);
 
+    // 解析失敗維持靜音
     if (successJpUrls.length === 0) {
       return Promise.resolve(null);
     }
