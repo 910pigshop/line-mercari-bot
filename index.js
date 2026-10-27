@@ -20,51 +20,71 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
   }
 });
 
-// 解析單一台灣 Mercari 網址（支援一般個人賣家 + Shops 商家）
+// 解析單一台灣 Mercari 網址（支援一般賣家 + Shops 商家）
 async function getJpUrlFromTwUrl(fullUrl) {
   let resultUrl = null;
 
-  // 1. 從網址提取乾淨的 item UUID (例如 ab7fd1d7-f571-4e46-bab5-de17283eeb30)
+  // 1. 從網址提取乾淨的 UUID
   const uuidMatch = fullUrl.match(/items\/([a-zA-Z0-9-]+)/);
   if (!uuidMatch) return null;
   const uuid = uuidMatch[1];
 
-  // 2. 從網址提取 variant ID (例如 5a14a5a2-899f-4caf-8455-8fba4afe667d)
-  const variantMatch = fullUrl.match(/variant=([a-zA-Z0-9-]+)/);
+  // 2. 策略一：請求台灣頁面，抓取 __NEXT_DATA__ JSON (最精準)
+  try {
+    const htmlResp = await fetch(fullUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'zh-TW,zh;q=0.9,ja;q=0.8,en;q=0.7'
+      }
+    });
 
-  // 策略 A：如果有 variant ID (商家 Shops 頁面特徵)
-  if (variantMatch) {
-    const variantId = variantMatch[1];
-    try {
-      // 直連台灣後端 GraphQL API 查出的原始 Shops Product ID
-      const graphqlQuery = {
-        query: `query { shopProductVariant(id: "${variantId}") { productId rawProductId } }`
-      };
+    const html = await htmlResp.text();
 
-      const gqResp = await fetch('https://tw.mercari.com/api/graphql', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
-          'Referer': `https://tw.mercari.com/zh-hant/items/${uuid}`
-        },
-        body: JSON.stringify(graphqlQuery)
-      });
+    // 提取 __NEXT_DATA__ 腳本內容
+    const nextDataMatch = html.match(/<script id="__NEXT_DATA__" type="application\/json">(.*?)<\/script>/s);
+    if (nextDataMatch) {
+      const jsonStr = nextDataMatch[1];
+      
+      // A. 尋找 Shops 專屬的 Hash ID (例如 "j3gYo6MwpP57Xt562uu4SW")
+      // 在 JSON 中尋找 rawProductId, productId, 或 shops/product 標籤
+      const shopProdMatch = jsonStr.match(/"(?:rawProductId|productId|shopProductId)"\s*:\s*"([a-zA-Z0-9]{20,26})"/);
+      const shopUrlMatch = jsonStr.match(/\/shops\/product\/([a-zA-Z0-9]{20,26})/);
 
-      if (gqResp.ok) {
-        const gqData = await gqResp.json();
-        const variantData = gqData?.data?.shopProductVariant;
-        const prodId = variantData?.rawProductId || variantData?.productId;
-        if (prodId) {
-          resultUrl = `https://jp.mercari.com/shops/product/${prodId}`;
+      if (shopProdMatch && !shopProdMatch[1].startsWith('m')) {
+        resultUrl = `https://jp.mercari.com/shops/product/${shopProdMatch[1]}`;
+      } else if (shopUrlMatch) {
+        resultUrl = `https://jp.mercari.com/shops/product/${shopUrlMatch[1]}`;
+      }
+
+      // B. 尋找一般個人商品的 m-ID (例如 "m12345678901")
+      if (!resultUrl) {
+        const itemMatch = jsonStr.match(/"(?:rawItemId|itemId|id)"\s*:\s*"(m\d{10,11})"/);
+        if (itemMatch) {
+          resultUrl = `https://jp.mercari.com/item/${itemMatch[1]}`;
         }
       }
-    } catch (e) {
-      console.log(`[Shops Variant] Failed for ${uuid}`);
     }
+
+    // 備用：若 JSON 解析沒撈到，直接在大字串中正則掃描
+    if (!resultUrl) {
+      // 搜尋 Shops 格式
+      const directShopMatch = html.match(/shops\/product\/([a-zA-Z0-9]{20,26})/);
+      if (directShopMatch) {
+        resultUrl = `https://jp.mercari.com/shops/product/${directShopMatch[1]}`;
+      } else {
+        // 搜尋 m-ID 格式
+        const directItemMatch = html.match(/m\d{10,11}/);
+        if (directItemMatch) {
+          resultUrl = `https://jp.mercari.com/item/${directItemMatch[0]}`;
+        }
+      }
+    }
+  } catch (e) {
+    console.log(`[HTML SSR Fetch] Failed for ${uuid}:`, e.message);
   }
 
-  // 策略 B：打跨國 API 查詢 (一般商品 / 部分 Shops)
+  // 3. 策略二：如果前面都沒找到，最後退回 API 查詢
   if (!resultUrl) {
     try {
       const cbApiUrl = `https://api.mercari.jp/cross_border/v1/items/${uuid}`;
@@ -86,47 +106,10 @@ async function getJpUrlFromTwUrl(fullUrl) {
           }
         } else if (item.id && item.id.startsWith('m')) {
           resultUrl = `https://jp.mercari.com/item/${item.id}`;
-        } else if (item.raw_item_id && item.raw_item_id.startsWith('m')) {
-          resultUrl = `https://jp.mercari.com/item/${item.raw_item_id}`;
         }
       }
     } catch (e) {
       console.log(`[API Cross Border] Failed for ${uuid}`);
-    }
-  }
-
-  // 策略 C：抓取 HTML 頁面進行全文深度掃描
-  if (!resultUrl) {
-    try {
-      const cleanUrl = `https://tw.mercari.com/zh-hant/items/${uuid}`;
-      const htmlResp = await fetch(cleanUrl, {
-        headers: {
-          'User-Agent': 'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)',
-          'Accept': 'text/html'
-        }
-      });
-      const html = await htmlResp.text();
-
-      // 比對各種 Shops Product ID 正則 pattern
-      const shopMatch = html.match(/\/shops\/product\/([a-zA-Z0-9]+)/);
-      const prodIdMatch = html.match(/"rawProductId"\s*:\s*"([a-zA-Z0-9]+)"/);
-      const prodIdMatch2 = html.match(/"productId"\s*:\s*"([a-zA-Z0-9]+)"/);
-
-      if (shopMatch) {
-        resultUrl = `https://jp.mercari.com/shops/product/${shopMatch[1]}`;
-      } else if (prodIdMatch && !prodIdMatch[1].startsWith('m')) {
-        resultUrl = `https://jp.mercari.com/shops/product/${prodIdMatch[1]}`;
-      } else if (prodIdMatch2 && !prodIdMatch2[1].startsWith('m')) {
-        resultUrl = `https://jp.mercari.com/shops/product/${prodIdMatch2[1]}`;
-      } else {
-        // 比對一般個人賣家 m-ID
-        const itemMatch = html.match(/m\d{10,11}/);
-        if (itemMatch) {
-          resultUrl = `https://jp.mercari.com/item/${itemMatch[0]}`;
-        }
-      }
-    } catch (e) {
-      console.log(`[HTML Fallback] Failed for ${uuid}`);
     }
   }
 
@@ -148,7 +131,7 @@ async function handleEvent(event) {
   }
 
   try {
-    // 去重複
+    // 網址去重複
     const uniqueUrls = Array.from(new Set(twUrlMatches));
 
     // 並列處理解析所有網址
