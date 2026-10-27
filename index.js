@@ -20,9 +20,9 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
   }
 });
 
-// 解析單一台灣 Mercari 網址（精準支援一般商品 + Shops 商店）
+// 解析單一台灣 Mercari 網址
 async function getJpUrlFromTwUrl(fullUrl) {
-  // 1. 清理網址，取出精確的 UUID
+  // 1. 徹底分離 URL 參數，只保留純淨網址與 UUID
   const cleanUrl = fullUrl.split('?')[0];
   const uuidMatch = cleanUrl.match(/items\/([a-zA-Z0-9-]+)/);
   if (!uuidMatch) return null;
@@ -30,7 +30,7 @@ async function getJpUrlFromTwUrl(fullUrl) {
   const uuid = uuidMatch[1];
   let resultUrl = null;
 
-  // 2. 策略一：直接打 Mercari 官方 API 查詢 (涵蓋跨境 API 與微服務)
+  // 2. 策略一：打跨境 API
   try {
     const cbApiUrl = `https://api.mercari.jp/cross_border/v1/items/${uuid}`;
     const cbResp = await fetch(cbApiUrl, {
@@ -44,14 +44,14 @@ async function getJpUrlFromTwUrl(fullUrl) {
       const cbData = await cbResp.json();
       const item = cbData?.item || {};
 
-      // 情況 A：如果是 Shops 商店商品
-      if (item.shop_id || item.is_shops || item.product_id || (item.id && !item.id.startsWith('m'))) {
+      // A. Shops 商店判斷 (ID 非 m 開頭，或者標記為 is_shops)
+      if (item.is_shops || item.shop_id || (item.id && !item.id.startsWith('m'))) {
         const productId = item.raw_item_id || item.product_id || item.id;
         if (productId) {
           resultUrl = `https://jp.mercari.com/shops/product/${productId}`;
         }
       } 
-      // 情況 B：一般個人賣家商品
+      // B. 一般個人賣家商品 (ID 為 m 開頭)
       else if (item.id && item.id.startsWith('m')) {
         resultUrl = `https://jp.mercari.com/item/${item.id}`;
       } else if (item.raw_item_id && item.raw_item_id.startsWith('m')) {
@@ -59,63 +59,33 @@ async function getJpUrlFromTwUrl(fullUrl) {
       }
     }
   } catch (e) {
-    console.log(`[${uuid}] API strategy 1 failed:`, e.message);
+    console.log(`[${uuid}] API error:`, e.message);
   }
 
-  // 3. 策略二：深度爬取台灣頁面原始碼，挖掘隱藏的 Shops ID 或 m-ID
+  // 3. 策略二：備用抓取台灣頁面 HTML 原始碼
   if (!resultUrl) {
     try {
       const htmlResp = await fetch(cleanUrl, {
         headers: {
-          'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
-          'Accept': 'text/html,application/xhtml+xml'
+          'User-Agent': 'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)',
+          'Accept': 'text/html'
         }
       });
-
       const html = await htmlResp.text();
 
-      // A. 比對 Shops 商品 ID 格式（常見如 j3gYo6MwpP57Xt562uu4SW，由英數字混雜長度約22位）
-      const shopProdMatch = html.match(/"product_id"\s*:\s*"([a-zA-Z0-9]{20,25})"/);
-      const shopMetaMatch = html.match(/shops\/product\/([a-zA-Z0-9]{20,25})/);
-      const variantMatch = html.match(/"productId"\s*:\s*"([a-zA-Z0-9]{20,25})"/);
-
-      if (shopProdMatch) {
-        resultUrl = `https://jp.mercari.com/shops/product/${shopProdMatch[1]}`;
-      } else if (shopMetaMatch) {
-        resultUrl = `https://jp.mercari.com/shops/product/${shopMetaMatch[1]}`;
-      } else if (variantMatch) {
-        resultUrl = `https://jp.mercari.com/shops/product/${variantMatch[1]}`;
-      }
-
-      // B. 比對一般個人賣家商品的 m-ID
-      if (!resultUrl) {
+      // 比對 Shops 商店 ID (如 /shops/product/j3gYo6MwpP57Xt562uu4SW)
+      const shopMatch = html.match(/shops\/product\/([a-zA-Z0-9]+)/);
+      if (shopMatch) {
+        resultUrl = `https://jp.mercari.com/shops/product/${shopMatch[1]}`;
+      } else {
+        // 比對一般個人商品 m-ID
         const itemMatch = html.match(/m\d{10,11}/);
         if (itemMatch) {
           resultUrl = `https://jp.mercari.com/item/${itemMatch[0]}`;
         }
       }
     } catch (e) {
-      console.log(`[${uuid}] Strategy 2 failed:`, e.message);
-    }
-  }
-
-  // 4. 策略三：終極備用（若前面皆找不到，針對 Shops 商家 Hash 的補抓）
-  if (!resultUrl) {
-    try {
-      const shopHashMatch = fullUrl.match(/variant=([a-zA-Z0-9-]+)/);
-      if (shopHashMatch) {
-        // 如果是商店專屬的引數，嘗試用正則擷取網頁中未格式化的 JSON 物件
-        const htmlResp = await fetch(fullUrl, {
-          headers: { 'User-Agent': 'facebookexternalhit/1.1' }
-        });
-        const html = await htmlResp.text();
-        const genericHash = html.match(/("id"|"productId"|"rawItemId")\s*:\s*"([a-zA-Z0-9]{22})"/);
-        if (genericHash && genericHash[2]) {
-          resultUrl = `https://jp.mercari.com/shops/product/${genericHash[2]}`;
-        }
-      }
-    } catch (e) {
-      console.log(`[${uuid}] Strategy 3 failed:`, e.message);
+      console.log(`[${uuid}] Fallback error:`, e.message);
     }
   }
 
@@ -137,10 +107,10 @@ async function handleEvent(event) {
   }
 
   try {
-    // 去重複
+    // 網址去重
     const uniqueUrls = Array.from(new Set(twUrlMatches));
 
-    // 並列處理解析
+    // 並列解析
     const results = await Promise.all(
       uniqueUrls.map(async (url) => {
         const jpUrl = await getJpUrlFromTwUrl(url);
@@ -150,12 +120,12 @@ async function handleEvent(event) {
 
     const successJpUrls = results.filter(r => r.jpUrl !== null).map(r => r.jpUrl);
 
-    // 完全找不到時保持沉默
+    // 解析失敗維持靜音
     if (successJpUrls.length === 0) {
       return Promise.resolve(null);
     }
 
-    // 組合回覆
+    // 組合回覆內容
     let replyText = `🤖 此為ROBOT自動通知 🤖 因偵測到非日本MERCARI頁面,已成功為您導入日本頁面 請確認是否與原提供頁面是否為相同商品 如確認為相同商品 請務必回覆【相同】：\n\n`;
 
     if (successJpUrls.length === 1) {
