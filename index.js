@@ -28,9 +28,8 @@ async function getJpUrlFromTwUrl(fullUrl) {
   const variantId = variantMatch ? variantMatch[1] : null;
   const itemId = uuidMatch ? uuidMatch[1] : null;
 
-  // 1. 嘗試直接從 API 取得 (同時測試 Item ID 與 Variant ID)
+  // 1. API 掃描 (對一般個人商品極快，但商店商品通常會被擋)
   const idsToTest = [variantId, itemId].filter(Boolean);
-  
   for (const id of idsToTest) {
     try {
       const cbResp = await fetch(`https://api.mercari.jp/cross_border/v1/items/${id}`, {
@@ -44,60 +43,91 @@ async function getJpUrlFromTwUrl(fullUrl) {
         const cbData = await cbResp.json();
         const item = cbData?.item || cbData || {};
         
-        // 判斷是否為 Shops 商店商品
         if (item.product_id || item.raw_product_id) {
           const pId = item.raw_product_id || item.product_id;
           if (pId && !pId.includes('-')) return `https://jp.mercari.com/shops/product/${pId}`;
         }
 
-        // 判斷是否為一般個人商品
         const mId = item.id || item.raw_item_id;
         if (mId && typeof mId === 'string' && mId.startsWith('m')) {
           return `https://jp.mercari.com/item/${mId}`;
         }
       }
     } catch (e) {
-      console.log(`[API Error for ${id}]:`, e.message);
+      console.log(`[API Error]:`, e.message);
     }
   }
 
-  // 2. 終極備用方案 (直接抓取網頁 HTML，暴力撈取資料)
-  try {
-    const htmlResp = await fetch(fullUrl, {
-      headers: {
-        'User-Agent': 'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)',
-        'Accept': 'text/html'
+  // 2. 終極多重 User-Agent 網頁解析 (專門對付 Shops 商店與 Cloudflare 防護)
+  let htmlJpUrl = null;
+  
+  // 依序偽裝成 Facebook、Google 爬蟲、真實電腦、真實手機
+  const userAgents = [
+    'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)',
+    'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1'
+  ];
+
+  for (const ua of userAgents) {
+    try {
+      const htmlResp = await fetch(fullUrl, {
+        headers: {
+          'User-Agent': ua,
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7'
+        }
+      });
+      
+      // 如果被 Cloudflare 阻擋 (403) 則立刻換下一個身分
+      if (!htmlResp.ok) continue;
+
+      const html = await htmlResp.text();
+
+      // (A) 找尋一般商品 m-ID
+      const mIdMatch = html.match(/m\d{10,11}/);
+      if (mIdMatch) {
+        htmlJpUrl = `https://jp.mercari.com/item/${mIdMatch[0]}`;
+        break;
       }
-    });
-    const html = await htmlResp.text();
 
-    // (A) 找尋一般商品 m-ID
-    const mIdMatch = html.match(/m\d{10,11}/);
-    if (mIdMatch) return `https://jp.mercari.com/item/${mIdMatch[0]}`;
+      // (B) 找尋頁面中是否有直接暴露的日本網址
+      const directLinkMatch = html.match(/https:\/\/jp\.mercari\.com\/(?:item\/|shops\/product\/)([a-zA-Z0-9_]+)/);
+      if (directLinkMatch && !directLinkMatch[1].includes('-')) {
+        const type = html.includes(`shops/product/${directLinkMatch[1]}`) ? 'shops/product' : 'item';
+        htmlJpUrl = `https://jp.mercari.com/${type}/${directLinkMatch[1]}`;
+        break;
+      }
 
-    // (B) 暴力尋找 Shops 商店 ID (特徵：長度超過 10 且無連字號的英數字)
-    const shopRegexes = [
-      /"rawProductId":"([a-zA-Z0-9]+)"/g,
-      /"productId":"([a-zA-Z0-9]+)"/g,
-      /shops\/product\/([a-zA-Z0-9]+)/g,
-      /mercari:\/\/shop\/product\/([a-zA-Z0-9]+)/g
-    ];
+      // (C) 暴力尋找底層資料庫的商店 ID
+      const shopRegexes = [
+        /"rawProductId"\s*:\s*"([a-zA-Z0-9]+)"/,
+        /"productId"\s*:\s*"([a-zA-Z0-9]+)"/,
+        /mercari:\/\/shop\/product\/([a-zA-Z0-9]+)/,
+        /shops\/product\/([a-zA-Z0-9]+)/
+      ];
 
-    for (const regex of shopRegexes) {
-      // 確保相容性，改用全域 match 取代 matchAll
-      let m;
-      while ((m = regex.exec(html)) !== null) {
-        const id = m[1];
-        if (!id.includes('-') && id.length > 10) {
-          return `https://jp.mercari.com/shops/product/${id}`;
+      for (const regex of shopRegexes) {
+        const match = html.match(regex);
+        if (match) {
+          const id = match[1];
+          // 確保不是 UUID 且長度符合商店 ID 特徵
+          if (!id.includes('-') && id.length >= 10 && id.length <= 40) {
+            htmlJpUrl = `https://jp.mercari.com/shops/product/${id}`;
+            break;
+          }
         }
       }
+      
+      // 如果找到了，就結束身分切換迴圈
+      if (htmlJpUrl) break;
+
+    } catch (e) {
+      console.log(`[HTML Parse Error - UA: ${ua}]:`, e.message);
     }
-  } catch (e) {
-    console.log(`[Fallback Error]:`, e.message);
   }
 
-  return null;
+  return htmlJpUrl || null;
 }
 
 async function handleEvent(event) {
@@ -117,6 +147,7 @@ async function handleEvent(event) {
   try {
     const uniqueUrls = Array.from(new Set(twUrlMatches));
     
+    // 並列處理解析所有網址
     const results = await Promise.all(
       uniqueUrls.map(async (url) => {
         const jpUrl = await getJpUrlFromTwUrl(url);
@@ -124,15 +155,19 @@ async function handleEvent(event) {
       })
     );
 
-    const successJpUrls = results.filter(r => r.jpUrl !== null).map(r => r.jpUrl);
+    const successResults = results.filter(r => r.jpUrl !== null);
+    const failResults = results.filter(r => r.jpUrl === null);
+    const successJpUrls = successResults.map(r => r.jpUrl);
 
+    // 全部失敗
     if (successJpUrls.length === 0) {
       return client.replyMessage(event.replyToken, {
         type: 'text',
-        text: '❌ 轉換失敗：無法從提供的網址中擷取到日本 Mercari 頁面。'
+        text: '❌ 轉換失敗：無法從提供的網址中擷取到日本 Mercari 頁面。可能是目標頁面已下架或遭防爬蟲機制阻擋。'
       });
     }
 
+    // 組合成功的回覆內容
     let replyText = `🤖 此為ROBOT自動通知 🤖 因偵測到非日本MERCARI頁面,已成功為您導入日本頁面 請確認是否與原提供頁面是否為相同商品 如確認為相同商品 請務必回覆【相同】：\n\n`;
 
     if (successJpUrls.length === 1) {
@@ -140,6 +175,11 @@ async function handleEvent(event) {
     } else {
       replyText += `🇯🇵 日本 Mercari 網址（共 ${successJpUrls.length} 個）：\n` + 
         successJpUrls.map((url, idx) => `${idx + 1}. ${url}`).join('\n\n');
+    }
+
+    // 新增：如果有漏掉的網址，會在最下方顯示提醒
+    if (failResults.length > 0) {
+      replyText += `\n\n⚠️ 提醒：有 ${failResults.length} 個網址解析失敗 (可能是商店商品或遭防阻擋)。`;
     }
 
     return client.replyMessage(event.replyToken, {
