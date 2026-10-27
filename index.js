@@ -20,7 +20,7 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
   }
 });
 
-// 解析單一台灣 Mercari 網址（支援一般賣家 + Shops 商家）
+// 解析單一台灣 Mercari 網址（支援一般賣家 + Mercari Shops 商家）
 async function getJpUrlFromTwUrl(fullUrl) {
   let resultUrl = null;
 
@@ -29,62 +29,83 @@ async function getJpUrlFromTwUrl(fullUrl) {
   if (!uuidMatch) return null;
   const uuid = uuidMatch[1];
 
-  // 2. 策略一：請求台灣頁面，抓取 __NEXT_DATA__ JSON (最精準)
+  // 2. 策略一：請求台灣頁面 HTML，直接掃描 Open Graph 與 JSON 數據 (最精準)
   try {
     const htmlResp = await fetch(fullUrl, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'zh-TW,zh;q=0.9,ja;q=0.8,en;q=0.7'
+        'User-Agent': 'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)',
+        'Accept': 'text/html,application/xhtml+xml',
+        'Accept-Language': 'zh-TW,zh;q=0.9,ja;q=0.8'
       }
     });
 
     const html = await htmlResp.text();
 
-    // 提取 __NEXT_DATA__ 腳本內容
-    const nextDataMatch = html.match(/<script id="__NEXT_DATA__" type="application\/json">(.*?)<\/script>/s);
-    if (nextDataMatch) {
-      const jsonStr = nextDataMatch[1];
-      
-      // A. 尋找 Shops 專屬的 Hash ID (例如 "j3gYo6MwpP57Xt562uu4SW")
-      // 在 JSON 中尋找 rawProductId, productId, 或 shops/product 標籤
-      const shopProdMatch = jsonStr.match(/"(?:rawProductId|productId|shopProductId)"\s*:\s*"([a-zA-Z0-9]{20,26})"/);
-      const shopUrlMatch = jsonStr.match(/\/shops\/product\/([a-zA-Z0-9]{20,26})/);
+    // A. 抓取 Shops 商店商品標籤 (例如 jp.mercari.com/shops/product/j3gYo6MwpP57Xt562uu4SW)
+    const ogShopMatch = html.match(/shops\/product\/([a-zA-Z0-9]{20,26})/);
+    const rawProdMatch = html.match(/"rawProductId"\s*:\s*"([a-zA-Z0-9]{20,26})"/);
+    const prodIdMatch = html.match(/"productId"\s*:\s*"([a-zA-Z0-9]{20,26})"/);
 
-      if (shopProdMatch && !shopProdMatch[1].startsWith('m')) {
-        resultUrl = `https://jp.mercari.com/shops/product/${shopProdMatch[1]}`;
-      } else if (shopUrlMatch) {
-        resultUrl = `https://jp.mercari.com/shops/product/${shopUrlMatch[1]}`;
-      }
-
-      // B. 尋找一般個人商品的 m-ID (例如 "m12345678901")
-      if (!resultUrl) {
-        const itemMatch = jsonStr.match(/"(?:rawItemId|itemId|id)"\s*:\s*"(m\d{10,11})"/);
-        if (itemMatch) {
-          resultUrl = `https://jp.mercari.com/item/${itemMatch[1]}`;
-        }
-      }
+    if (ogShopMatch) {
+      resultUrl = `https://jp.mercari.com/shops/product/${ogShopMatch[1]}`;
+    } else if (rawProdMatch && !rawProdMatch[1].startsWith('m')) {
+      resultUrl = `https://jp.mercari.com/shops/product/${rawProdMatch[1]}`;
+    } else if (prodIdMatch && !prodIdMatch[1].startsWith('m')) {
+      resultUrl = `https://jp.mercari.com/shops/product/${prodIdMatch[1]}`;
     }
 
-    // 備用：若 JSON 解析沒撈到，直接在大字串中正則掃描
+    // B. 若非 Shops，抓取一般個人賣家商品的 m-ID (例如 m12345678901)
     if (!resultUrl) {
-      // 搜尋 Shops 格式
-      const directShopMatch = html.match(/shops\/product\/([a-zA-Z0-9]{20,26})/);
-      if (directShopMatch) {
-        resultUrl = `https://jp.mercari.com/shops/product/${directShopMatch[1]}`;
-      } else {
-        // 搜尋 m-ID 格式
-        const directItemMatch = html.match(/m\d{10,11}/);
-        if (directItemMatch) {
-          resultUrl = `https://jp.mercari.com/item/${directItemMatch[0]}`;
-        }
+      const ogItemMatch = html.match(/item\/(m\d{10,11})/);
+      const rawItemMatch = html.match(/"rawItemId"\s*:\s*"(m\d{10,11})"/);
+      const generalItemMatch = html.match(/m\d{10,11}/);
+
+      if (ogItemMatch) {
+        resultUrl = `https://jp.mercari.com/item/${ogItemMatch[1]}`;
+      } else if (rawItemMatch) {
+        resultUrl = `https://jp.mercari.com/item/${rawItemMatch[1]}`;
+      } else if (generalItemMatch) {
+        resultUrl = `https://jp.mercari.com/item/${generalItemMatch[0]}`;
       }
     }
   } catch (e) {
-    console.log(`[HTML SSR Fetch] Failed for ${uuid}:`, e.message);
+    console.log(`[HTML Fetch] Failed for ${uuid}:`, e.message);
   }
 
-  // 3. 策略二：如果前面都沒找到，最後退回 API 查詢
+  // 3. 策略二：如果 HTML 沒抓到且有 variant 參數，打 GraphQL API 補抓
+  if (!resultUrl && fullUrl.includes('variant=')) {
+    const variantMatch = fullUrl.match(/variant=([a-zA-Z0-9-]+)/);
+    if (variantMatch) {
+      try {
+        const variantId = variantMatch[1];
+        const graphqlQuery = {
+          query: `query { shopProductVariant(id: "${variantId}") { rawProductId productId } }`
+        };
+
+        const gqResp = await fetch('https://tw.mercari.com/api/graphql', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+            'Referer': fullUrl
+          },
+          body: JSON.stringify(graphqlQuery)
+        });
+
+        if (gqResp.ok) {
+          const gqData = await gqResp.json();
+          const pId = gqData?.data?.shopProductVariant?.rawProductId || gqData?.data?.shopProductVariant?.productId;
+          if (pId) {
+            resultUrl = `https://jp.mercari.com/shops/product/${pId}`;
+          }
+        }
+      } catch (e) {
+        console.log(`[GraphQL] Failed for variant`);
+      }
+    }
+  }
+
+  // 4. 策略三：預備備用，打跨國 API
   if (!resultUrl) {
     try {
       const cbApiUrl = `https://api.mercari.jp/cross_border/v1/items/${uuid}`;
@@ -123,7 +144,7 @@ async function handleEvent(event) {
 
   const text = event.message.text.trim();
 
-  // 抓出訊息中所有台灣 Mercari 網址 (匹配包含 parameters 的完整 URL)
+  // 抓出訊息中所有台灣 Mercari 網址 (匹配整段完整 URL)
   const twUrlMatches = text.match(/https?:\/\/tw\.mercari\.com\/[^\s\n]+/g);
 
   if (!twUrlMatches || twUrlMatches.length === 0) {
@@ -131,7 +152,7 @@ async function handleEvent(event) {
   }
 
   try {
-    // 網址去重複
+    // 去重複
     const uniqueUrls = Array.from(new Set(twUrlMatches));
 
     // 並列處理解析所有網址
@@ -144,6 +165,7 @@ async function handleEvent(event) {
 
     const successJpUrls = results.filter(r => r.jpUrl !== null).map(r => r.jpUrl);
 
+    // 解析失敗維持靜音
     if (successJpUrls.length === 0) {
       return Promise.resolve(null);
     }
