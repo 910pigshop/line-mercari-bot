@@ -179,7 +179,7 @@ async function handleEvent(event) {
 
     // 新增：如果有漏掉的網址，會在最下方顯示提醒
     if (failResults.length > 0) {
-      replyText += `\n\n⚠️ 提醒：有 ${failResults.length} 個網址解析失敗 (可能是商店商品或遭防阻擋)。`;
+      replyText += `\n\n⚠️ 提醒：有 ${failResults.length} 個網址解析失敗 (可能是商店商品或遭防阻擋) 請稍待人員為您報價。`;
     }
 
     return client.replyMessage(event.replyToken, {
