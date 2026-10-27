@@ -168,7 +168,11 @@ async function handleEvent(event) {
     }
 
     // 組合成功的回覆內容
-    let replyText = `🤖 此為ROBOT自動通知 🤖 因偵測到非日本MERCARI頁面,已成功為您導入日本頁面 請確認是否與原提供頁面是否為相同商品 如確認為相同商品 請務必回覆【相同】：\n\n`;
+    let replyText = `🤖 此為ROBOT自動通知 🤖\n` +
+      `因偵測到非日本MERCARI頁面\n` +
+      `已成功為您導入日本頁面\n` +
+      `請確認是否與原提供頁面是否為相同商品\n` +
+      `如確認為相同商品 請務必回覆【相同】\n\n`;
 
     if (successJpUrls.length === 1) {
       replyText += `🇯🇵 日本 Mercari 網址：\n${successJpUrls[0]}`;
