@@ -55,7 +55,7 @@ async function getJpUrlFromTwUrl(fullUrl) {
     }
   }
 
-  // 2. 一般個人賣家商品解析 (原本完全正常的邏輯，保持不動)
+  // 2. 一般個人賣家商品解析
   const uuidMatch = fullUrl.match(/items\/([a-zA-Z0-9-]+)/);
   if (!uuidMatch) return null;
 
@@ -90,19 +90,34 @@ async function getJpUrlFromTwUrl(fullUrl) {
     console.log(`[Item Error] ${uuid}:`, e.message);
   }
 
-  // 3. 備用方案
+  // 3. 備用方案 (直接抓取網頁 HTML)
   try {
-    const htmlResp = await fetch(`https://tw.mercari.com/zh-hant/items/${uuid}`, {
+    const htmlResp = await fetch(fullUrl, {
       headers: {
         'User-Agent': 'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)',
         'Accept': 'text/html'
       }
     });
     const html = await htmlResp.text();
+
+    // 嘗試匹配一般個人賣家的 m-ID
     const match = html.match(/m\d{10,11}/);
     if (match) {
       return `https://jp.mercari.com/item/${match[0]}`;
     }
+
+    // 嘗試匹配 Shops 商店商品的 ID
+    const shopMatch = html.match(/shops\/product\/([a-zA-Z0-9]+)/);
+    if (shopMatch) {
+      return `https://jp.mercari.com/shops/product/${shopMatch[1]}`;
+    }
+    
+    // 從 HTML 的 JSON 資料結構中硬撈 rawProductId
+    const rawIdMatch = html.match(/"rawProductId":"([a-zA-Z0-9]+)"/);
+    if (rawIdMatch) {
+      return `https://jp.mercari.com/shops/product/${rawIdMatch[1]}`;
+    }
+
   } catch (e) {
     console.log(`[Fallback Error] ${uuid}:`, e.message);
   }
