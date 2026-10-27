@@ -29,30 +29,60 @@ async function getJpUrlFromTwUrl(fullUrl) {
 
   if (variantMatch) {
     const variantId = variantMatch[1];
+    const uuidMatch = fullUrl.match(/items\/([a-zA-Z0-9-]+)/);
+    const uuid = uuidMatch ? uuidMatch[1] : '';
+
+    // 招式 A：透過 GraphQL API 查詢
     try {
-      // 專門處理 Shops 商店：打台灣官方 GraphQL 獲取原始商店 Product ID
       const response = await fetch('https://tw.mercari.com/api/graphql', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36'
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+          'Referer': `https://tw.mercari.com/zh-hant/items/${uuid}`
         },
         body: JSON.stringify({
-          query: `query GetVariant($id: String!) { shopProductVariant(id: $id) { productId rawProductId } }`,
-          variables: { id: variantId }
+          query: `query getItem($id: String!) { item(id: $id) { id rawItemId productId rawProductId shopId } }`,
+          variables: { id: uuid }
         })
       });
 
       if (response.ok) {
         const json = await response.json();
-        const vData = json?.data?.shopProductVariant;
-        const shopProdId = vData?.rawProductId || vData?.productId;
+        const itemData = json?.data?.item;
+        const shopProdId = itemData?.rawProductId || itemData?.productId;
         if (shopProdId) {
           return `https://jp.mercari.com/shops/product/${shopProdId}`;
         }
       }
     } catch (e) {
-      console.log(`[Shops Error] ${variantId}:`, e.message);
+      console.log(`[Shops GraphQL Error] ${uuid}:`, e.message);
+    }
+
+    // 招式 B：直接抓取網頁爬取原始碼中的 OG 標籤 / Shops Product Hash (備援)
+    try {
+      const htmlResp = await fetch(`https://tw.mercari.com/zh-hant/items/${uuid}?variant=${variantId}`, {
+        headers: {
+          'User-Agent': 'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)',
+          'Accept': 'text/html'
+        }
+      });
+      const html = await htmlResp.text();
+
+      // 比對 Shops Product ID (22 位英數字 Hash)
+      const shopHashMatch = html.match(/\/shops\/product\/([a-zA-Z0-9]{20,26})/);
+      const rawProdMatch = html.match(/"rawProductId"\s*:\s*"([a-zA-Z0-9]{20,26})"/);
+      const prodIdMatch = html.match(/"productId"\s*:\s*"([a-zA-Z0-9]{20,26})"/);
+
+      if (shopHashMatch) {
+        return `https://jp.mercari.com/shops/product/${shopHashMatch[1]}`;
+      } else if (rawProdMatch) {
+        return `https://jp.mercari.com/shops/product/${rawProdMatch[1]}`;
+      } else if (prodIdMatch) {
+        return `https://jp.mercari.com/shops/product/${prodIdMatch[1]}`;
+      }
+    } catch (e) {
+      console.log(`[Shops HTML Error] ${uuid}:`, e.message);
     }
   }
 
